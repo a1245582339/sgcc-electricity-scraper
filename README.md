@@ -56,7 +56,7 @@
 ```bash
 # 克隆项目
 # TODO: 替换为你的 GitHub 仓库地址
-git clone https://github.com/<your-username>/sgcc-electricity-scraper.git
+git clone https://github.com/a1245582339/sgcc-electricity-scraper.git
 cd sgcc-electricity-scraper
 
 # 安装依赖
