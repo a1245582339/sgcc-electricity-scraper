@@ -1,0 +1,23 @@
+{
+  "name": "sgcc-electricity-scraper",
+  "version": "0.1.0",
+  "description": "国家电网 (SGCC) 电费余额与日用电量自动抓取服务",
+  "module": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun run --watch src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node-cron": "^3.0.11"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "node-cron": "^4.2.1",
+    "playwright": "^1.58.2"
+  },
+  "license": "MIT"
+}
