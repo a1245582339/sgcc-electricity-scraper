@@ -235,11 +235,22 @@ https://sms-relay.<你的子域名>.workers.dev
 
 **2.7** 设置鉴权密钥（防止别人调用你的 Worker）：
 
+先生成一个随机字符串作为密钥：
+
 ```bash
-wrangler secret put API_TOKEN
+openssl rand -hex 16
+# 输出类似：e3b0c44298fc1c149afbf4c8996fb924
 ```
 
-终端会提示 `Enter a secret value:`，输入一个你自己生成的随机字符串（比如用 `openssl rand -hex 16` 生成），回车确认。**记下这个 Token**，后续配置也要用。
+**记下这个字符串**，然后把它设置到 Worker 的环境变量里：
+
+```bash
+wrangler secret put API_TOKEN
+# 终端会提示 "Enter a secret value:"
+# 粘贴上面生成的随机字符串，回车确认
+```
+
+这里 `API_TOKEN` 是变量名（固定的，不要改），你粘贴的随机字符串是它的值。这个值就是后面配置 SmsForwarder Header 和 GitHub Secrets 中 `SMS_RELAY_TOKEN` 用的同一个东西。
 
 ### 步骤 3：SmsForwarder 发送通道配置（方案 B）
 
