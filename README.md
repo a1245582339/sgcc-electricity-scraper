@@ -6,29 +6,88 @@
 
 ## 它是怎么工作的
 
-国家电网没有开放的数据 API，本项目通过浏览器自动化模拟真人操作来获取数据。整个流程完全自动，无需人工干预：
+国家电网没有开放的数据 API，本项目通过浏览器自动化（Playwright）模拟真人操作来获取数据。
+
+**核心难点**是登录——95598 使用短信验证码登录，本项目通过 [SmsForwarder](https://github.com/pppscn/SmsForwarder)（一个 Android 短信转发 App）实现全自动闭环：手机收到验证码短信后自动转发给服务，服务再将验证码填入浏览器完成登录。整个过程无需人工干预。
+
+项目支持两种部署方案，短信验证码的流转路径不同：
+
+### 方案 A：本地部署（短信直达）
+
+手机和服务在同一局域网内，SmsForwarder 直接 POST 到服务的 webhook，验证码通过进程内事件（EventEmitter）即时传递给 Playwright，延迟 < 1 秒。
 
 ```mermaid
 sequenceDiagram
-    participant S as 本服务 (Bun)
-    participant P as Playwright (Chromium)
-    participant W as 95598.cn
-    participant Phone as SmsForwarder (手机)
+    participant Cron as cron 定时 / 手动触发
+    participant Scraper as scraper.ts (Playwright)
+    participant Server as server.ts (Bun HTTP)
+    participant SMS as sms.ts (EventEmitter)
+    participant Web as 95598.cn
+    participant Phone as 📱 SmsForwarder
+    participant Storage as storage.ts (JSON 文件)
 
-    S->>P: ① 触发抓取（定时 / 手动）
-    P->>W: ② 打开 95598.cn
-    P->>W: ③ 输入手机号
-    P->>W: ④ 点击获取验证码
-    W-->>Phone: ⑤ 95598 发送短信验证码
-    Phone-->>S: ⑥ 转发验证码（webhook / CF Worker 中转）
-    S->>P: ⑦ 传递 6 位验证码
-    P->>W: ⑧ 填入验证码并登录
-    P->>W: ⑨ 读取余额 + 日用电量 + 峰谷明细
-    P-->>S: ⑩ 返回数据
-    S->>S: ⑪ 保存 JSON，通过 GET /api/data 对外提供
+    Cron->>Scraper: 触发抓取
+    Scraper->>Web: ① 打开 95598.cn，输入手机号
+    Scraper->>Web: ② 点击「获取验证码」
+    Web-->>Phone: ③ 95598 发送短信验证码到手机
+    Phone->>Server: ④ POST /api/webhook/sms<br/>{"text": "验证码654321..."}
+    Server->>SMS: ⑤ 提取6位数字 → receiveCode()
+    SMS-->>Scraper: ⑥ EventEmitter.emit 通知<br/>等待中的 waitForCode() 立即返回
+    Scraper->>Web: ⑦ 填入验证码，点击登录
+    Web-->>Scraper: ⑧ 登录成功
+    Scraper->>Web: ⑨ 读取账户余额
+    Scraper->>Web: ⑩ 读取日用电量 + 展开峰谷明细
+    Scraper->>Storage: ⑪ 保存到 data/records.json
+
+    Note over Server: GET /api/data → 返回用电数据
 ```
 
-**关键设计**：登录 95598 需要短信验证码，本服务通过 [SmsForwarder](https://github.com/pppscn/SmsForwarder) 配合手机实现全自动闭环——手机收到验证码短信后自动转发，服务再将验证码填入浏览器完成登录。
+### 方案 B：GitHub Actions + Cloudflare Worker（云端中转）
+
+没有常开服务器时，用 Cloudflare Worker 做验证码中转站。SmsForwarder 把验证码 POST 到 Worker 存入 KV，GitHub Actions 中运行的 scraper 每 3 秒轮询取验证码，延迟 3~6 秒。
+
+```mermaid
+sequenceDiagram
+    participant GA as GitHub Actions (cron)
+    participant Scraper as scraper (run-once.ts)
+    participant Worker as ☁️ Cloudflare Worker
+    participant KV as Cloudflare KV
+    participant Web as 95598.cn
+    participant Phone as 📱 SmsForwarder
+    participant You as 👤 你的系统
+
+    GA->>Scraper: 触发抓取
+    Scraper->>Worker: DELETE /code（清除残留验证码）
+    Worker->>KV: 删除 latest_code
+    Scraper->>Web: ① 打开 95598.cn，输入手机号
+    Scraper->>Web: ② 点击「获取验证码」
+    Web-->>Phone: ③ 95598 发送短信验证码到手机
+    Phone->>Worker: ④ POST /sms<br/>{"text": "验证码654321..."}
+    Worker->>KV: ⑤ 提取6位数字 → put("latest_code", "654321", TTL=5min)
+
+    loop 每 3 秒轮询，最长 3 分钟
+        Scraper->>Worker: GET /code
+        Worker->>KV: get("latest_code")
+        KV-->>Worker: "654321"
+        Worker->>KV: delete("latest_code")
+        Worker-->>Scraper: ⑥ {"code": "654321"}
+    end
+
+    Scraper->>Web: ⑦ 填入验证码，点击登录
+    Web-->>Scraper: ⑧ 登录成功
+    Scraper->>Web: ⑨ 读取余额 + 日用电量 + 峰谷明细
+    Scraper->>Worker: ⑩ PUT /data（存储电费数据）
+    Worker->>KV: put("electricity_data", {...})
+
+    You->>Worker: GET /data
+    Worker->>KV: get("electricity_data")
+    KV-->>Worker: {...}
+    Worker-->>You: 返回用电数据 JSON
+```
+
+**两种方案的关键区别在于验证码如何到达 scraper**：
+- **方案 A**：SmsForwarder → HTTP POST → 服务内存（EventEmitter）→ Playwright，延迟 < 1 秒
+- **方案 B**：SmsForwarder → HTTP POST → Cloudflare KV → scraper 每 3 秒轮询 → Playwright，延迟 3~6 秒
 
 ---
 
