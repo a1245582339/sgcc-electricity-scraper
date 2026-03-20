@@ -29,6 +29,4 @@ jobs:
           PHONE_NUMBER: ${{ secrets.PHONE_NUMBER }}
           SMS_RELAY_URL: ${{ secrets.SMS_RELAY_URL }}
           SMS_RELAY_TOKEN: ${{ secrets.SMS_RELAY_TOKEN }}
-          PUSH_URL: ${{ secrets.PUSH_URL }}
-          PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
         run: bun run src/run-once.ts

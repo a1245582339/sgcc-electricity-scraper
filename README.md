@@ -8,38 +8,24 @@
 
 国家电网没有开放的数据 API，本项目通过浏览器自动化模拟真人操作来获取数据。整个流程完全自动，无需人工干预：
 
-```
-┌─────────────-┐    ① 触发抓取（定时 / 手动）       ┌──────────────────┐
-│  本服务       │ ──────────────────────────────→ │  Playwright      │
-│  (Bun HTTP)  │                                 │  无头 Chromium    │
-└──────┬───────┘                                 └────────┬─────────┘
-       │                                                  │
-       │                                          ② 打开 95598.cn
-       │                                          ③ 输入手机号
-       │                                          ④ 点击获取验证码
-       │                                                   │
-       │         ⑤ 95598 发送短信到你的手机                  │
-       │                    │                              │
-       │         ┌──────────▼──────────┐                   │
-       │         │  SmsForwarder (手机) │                   │
-       │         │  监听到短信，转发     │                    │
-       │         └──────────┬──────────┘                   │
-       │                    │                              │
-       │  ⑥ 验证码送达（webhook 或 CF Worker 中转）          │
-       │◄───────────────────┘                              │
-       │                                                   │
-       │  ⑦ 提取6位验证码，传递给浏览器                        │
-       │──────────────────────────────────────────────────→│
-       │                                          ⑧ 填入验证码并登录
-       │                                          ⑨ 进入「我的」页面
-       │                                          ⑩ 读取账户余额
-       │                                          ⑪ 进入「日用电量」
-       │                                          ⑫ 展开峰谷明细
-       │                                          ⑬ 提取所有数据
-       │◄──────────────────────────────────────────────────│
-       │                                                   │
-  ⑭ 保存到本地 JSON                                         │
-  ⑮ 通过 GET /api/data 对外提供                             │
+```mermaid
+sequenceDiagram
+    participant S as 本服务 (Bun)
+    participant P as Playwright (Chromium)
+    participant W as 95598.cn
+    participant Phone as SmsForwarder (手机)
+
+    S->>P: ① 触发抓取（定时 / 手动）
+    P->>W: ② 打开 95598.cn
+    P->>W: ③ 输入手机号
+    P->>W: ④ 点击获取验证码
+    W-->>Phone: ⑤ 95598 发送短信验证码
+    Phone-->>S: ⑥ 转发验证码（webhook / CF Worker 中转）
+    S->>P: ⑦ 传递 6 位验证码
+    P->>W: ⑧ 填入验证码并登录
+    P->>W: ⑨ 读取余额 + 日用电量 + 峰谷明细
+    P-->>S: ⑩ 返回数据
+    S->>S: ⑪ 保存 JSON，通过 GET /api/data 对外提供
 ```
 
 **关键设计**：登录 95598 需要短信验证码，本服务通过 [SmsForwarder](https://github.com/pppscn/SmsForwarder) 配合手机实现全自动闭环——手机收到验证码短信后自动转发，服务再将验证码填入浏览器完成登录。
@@ -77,7 +63,7 @@
 |---|---|---|
 | **运行环境** | 你自己的服务器/NAS（7×24 运行） | GitHub Actions（定时触发，用完即走） |
 | **短信验证码** | SmsForwarder → 直接 POST 到服务 webhook | SmsForwarder → Cloudflare Worker 中转 → scraper 轮询 |
-| **数据存储** | 本地 JSON 文件，通过 API 对外提供 | 抓取后 PUT 推送到你的目标服务器 |
+| **数据存储** | 本地 JSON 文件，通过 API 对外提供 | 存到 Cloudflare KV，通过 Worker 的 `GET /data` 读取 |
 | **适合场景** | 有 24 小时运行的机器 | 没有常开服务器，或只想白嫖 |
 | **费用** | 自付服务器电费 | 全免费（GitHub Actions 2000 分钟/月 + CF Worker 免费额度） |
 
@@ -145,20 +131,22 @@ docker run -d \
 
 ### 架构
 
+```mermaid
+graph LR
+    Phone[📱 SmsForwarder]
+    Worker[☁️ Cloudflare Worker]
+    KV[(Cloudflare KV)]
+    GA[⚙️ GitHub Actions]
+    You[👤 你的系统]
+
+    Phone -- "POST /sms<br>转发验证码" --> Worker
+    GA -- "GET /code<br>轮询验证码" --> Worker
+    Worker -- 读写 --> KV
+    GA -- "PUT /data<br>存储电费数据" --> Worker
+    You -- "GET /data<br>读取电费数据" --> Worker
 ```
-┌──────────────┐        ┌──────────────────┐        ┌─────────────────┐
-│ SmsForwarder │ POST   │ Cloudflare Worker │  GET   │ GitHub Actions  │
-│   (手机)     │──────→ │   SMS Relay       │ ←───── │ (定时 scraper)  │
-│              │ /sms   │   KV 存取验证码    │ /code  │                 │
-└──────────────┘        └──────────────────┘        └────────┬────────┘
-                                                             │
-                                                    抓取完成后 PUT
-                                                             │
-                                                    ┌────────▼────────┐
-                                                    │  你的目标服务器   │
-                                                    │ /api/electricity │
-                                                    └─────────────────┘
-```
+
+抓取完成后数据直接存到 Cloudflare KV 里，通过 `GET /data` 就能读取，不需要另外搞个服务器。
 
 ### 步骤 1：Fork 本仓库
 
@@ -259,34 +247,33 @@ wrangler secret put API_TOKEN
 
 ### 步骤 4：配置 GitHub Actions Secrets
 
-在你 Fork 的仓库中，进入 **Settings → Secrets and variables → Actions**，添加以下 Secrets：
+在你的仓库中，进入 **Settings → Secrets and variables → Actions → New repository secret**，逐个添加：
 
-| Secret 名称 | 说明 | 示例 |
-|-------------|------|------|
-| `PHONE_NUMBER` | 国网绑定的手机号 | `13800138000` |
-| `SMS_RELAY_URL` | Cloudflare Worker 的 URL | `https://sms-relay.xxx.workers.dev` |
-| `SMS_RELAY_TOKEN` | Worker 的 API Token（步骤 2 中设置的） | `your-random-token` |
-| `PUSH_URL` | 抓取数据推送的目标地址 | `http://your-server:3000/api/electricity/data` |
-| `PUSH_TOKEN` | 目标服务器的推送鉴权 Token | `your-push-token` |
+| Secret 名称 | 值从哪来 | 示例 |
+|-------------|---------|------|
+| `PHONE_NUMBER` | 你的国网 95598 绑定手机号 | `13800138000` |
+| `SMS_RELAY_URL` | 步骤 2.6 部署完成后终端输出的 Worker URL | `https://sms-relay.xxx.workers.dev` |
+| `SMS_RELAY_TOKEN` | 步骤 2.7 你自己生成并设置的那个随机字符串 | `e3b0c44298fc1c149afbf4c8996fb924` |
+
+只需要这 3 个。抓取完成后数据会自动存到 Cloudflare KV 里（通过同一个 Worker），不需要额外配置。
 
 ### 步骤 5：验证
 
-1. 在仓库的 **Actions** 页面，手动触发一次 `Electricity Scraper` workflow
+1. 在仓库的 **Actions** 页面，点击左侧 `Electricity Scraper`，然后点 **Run workflow** 手动触发一次
 2. 查看 Actions 日志，确认抓取成功
-3. 检查你的目标服务器是否收到了推送数据
+3. 浏览器访问 `https://sms-relay.<你的子域名>.workers.dev/data`，确认能看到电费数据
 
-配置完成后，GitHub Actions 会按 cron 定时运行（默认北京时间 0:00 和 6:00 各一次），可在 `.github/workflows/scrape.yml` 中修改。
+配置完成后，GitHub Actions 会按 cron 定时自动运行（默认北京时间 0:00 和 6:00 各一次），可在 `.github/workflows/scrape.yml` 中修改。
 
-### 环境变量（方案 B 专用）
+### 读取数据
 
-这些变量在方案 B 中通过 GitHub Secrets 配置，在方案 A 中不需要：
+数据存在 Cloudflare KV 里，通过 Worker 的 `GET /data` 公开接口读取（无需鉴权）：
 
-| 变量 | 说明 |
-|------|------|
-| `SMS_RELAY_URL` | Cloudflare Worker URL，设置后自动切换为 relay 轮询模式 |
-| `SMS_RELAY_TOKEN` | Worker 的鉴权 Token |
-| `PUSH_URL` | 抓取完成后推送数据的目标 URL |
-| `PUSH_TOKEN` | 推送鉴权 Token |
+```bash
+curl https://sms-relay.<你的子域名>.workers.dev/data
+```
+
+返回格式与方案 A 的 `GET /api/data` 完全相同。如果你有其他服务（如 magic-mirror 的 Go server）需要消费电费数据，把 `ELECTRICITY_API_URL` 指向这个 Worker URL 即可。
 
 ---
 

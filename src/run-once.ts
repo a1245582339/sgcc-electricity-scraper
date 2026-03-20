@@ -1,8 +1,8 @@
 import { runScraper } from "./scraper.ts";
 import { readRecords, readUpdatedAt } from "./storage.ts";
 
-const PUSH_URL = process.env.PUSH_URL || "";
-const PUSH_TOKEN = process.env.PUSH_TOKEN || "";
+const SMS_RELAY_URL = process.env.SMS_RELAY_URL || "";
+const SMS_RELAY_TOKEN = process.env.SMS_RELAY_TOKEN || "";
 
 async function main() {
   console.log("[run-once] 开始单次抓取...");
@@ -10,24 +10,24 @@ async function main() {
   const records = await runScraper();
   console.log(`[run-once] 抓取完成，${records.length} 条记录`);
 
-  if (PUSH_URL) {
-    console.log("[run-once] 推送数据到目标服务器...");
+  if (SMS_RELAY_URL) {
+    console.log("[run-once] 保存数据到 Cloudflare...");
     const body = JSON.stringify({
       records: readRecords(),
       updatedAt: readUpdatedAt(),
     });
-    const res = await fetch(PUSH_URL, {
+    const res = await fetch(`${SMS_RELAY_URL}/data`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        ...(PUSH_TOKEN ? { Authorization: `Bearer ${PUSH_TOKEN}` } : {}),
+        Authorization: `Bearer ${SMS_RELAY_TOKEN}`,
       },
       body,
     });
     if (!res.ok) {
-      throw new Error(`推送失败: ${res.status} ${await res.text()}`);
+      throw new Error(`保存失败: ${res.status} ${await res.text()}`);
     }
-    console.log("[run-once] 推送成功");
+    console.log("[run-once] 数据已保存");
   }
 
   console.log("[run-once] 完成");
