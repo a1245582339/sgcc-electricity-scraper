@@ -69,29 +69,66 @@ export async function runScraper(): Promise<ElectricityRecord[]> {
     await page.goto(LOGIN_URL, { waitUntil: "networkidle", timeout: 90000 });
     await waitForVueRender(page);
 
-    console.log("[scraper] 切换到账号登录...");
-    await page.evaluate(() => {
-      const sw = document.querySelector(".switch") as HTMLElement;
-      const al = document.querySelector(".account-login") as HTMLElement;
-      if (sw) sw.style.display = "";
-      if (al) al.style.display = "";
-    });
-    await page.waitForTimeout(500);
+    // Switch to account login & SMS code login with retry,
+    // because Vue may re-render and revert direct style changes.
+    const phoneInput = page.locator('.account-login input[placeholder="手机号码"]');
+    const MAX_LOGIN_SWITCH_ATTEMPTS = 5;
 
-    console.log("[scraper] 切换到短信验证码登录...");
-    await page.locator("div.code_login").click({ force: true });
-    await page.waitForTimeout(1000);
+    for (let attempt = 1; attempt <= MAX_LOGIN_SWITCH_ATTEMPTS; attempt++) {
+      console.log(`[scraper] 切换到账号登录 (尝试 ${attempt}/${MAX_LOGIN_SWITCH_ATTEMPTS})...`);
+
+      // Force-show the account login section via DOM
+      await page.evaluate(() => {
+        document.querySelectorAll<HTMLElement>(".switch, .account-login, .code_form").forEach(el => {
+          el.style.setProperty("display", "block", "important");
+        });
+      });
+      await page.waitForTimeout(500);
+
+      // Click the SMS code login tab
+      const codeLoginTab = page.locator("div.code_login");
+      if (await codeLoginTab.count() > 0) {
+        await codeLoginTab.click({ force: true });
+      }
+      await page.waitForTimeout(1000);
+
+      // Check if phone input is now visible
+      if (await phoneInput.isVisible().catch(() => false)) break;
+
+      if (attempt === MAX_LOGIN_SWITCH_ATTEMPTS) {
+        console.log("[scraper] 输入框始终不可见，回退到 JS 直接注入");
+      }
+    }
 
     console.log("[scraper] 输入手机号...");
-    await page
-      .locator('.account-login input[placeholder="手机号码"]')
-      .fill(phoneNumber);
+    if (await phoneInput.isVisible().catch(() => false)) {
+      await phoneInput.fill(phoneNumber);
+    } else {
+      // Fallback: set value via JavaScript when element is in DOM but hidden by Vue
+      const filled = await page.evaluate((phone) => {
+        const input = document.querySelector<HTMLInputElement>(
+          '.account-login input[placeholder="手机号码"]'
+        );
+        if (!input) return false;
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype, "value"
+        )?.set;
+        if (nativeSetter) nativeSetter.call(input, phone);
+        else input.value = phone;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      }, phoneNumber);
+      if (!filled) throw new Error("无法找到手机号输入框");
+      console.log("[scraper] 已通过 JS 注入手机号");
+    }
 
     console.log("[scraper] 勾选同意协议...");
-    await page
-      .locator(".code_form .checked-box.un-checked")
-      .click({ force: true });
-    await page.waitForTimeout(500);
+    const checkbox = page.locator(".code_form .checked-box.un-checked");
+    if (await checkbox.count() > 0) {
+      await checkbox.click({ force: true });
+      await page.waitForTimeout(500);
+    }
 
     console.log("[scraper] 点击获取验证码...");
     await clearPendingCode();
@@ -101,9 +138,25 @@ export async function runScraper(): Promise<ElectricityRecord[]> {
     const code = await waitForCode();
     console.log("[scraper] 收到验证码，填入中...");
 
-    await page
-      .locator('.account-login input[placeholder="请输入验证码"]')
-      .fill(code);
+    const codeInput = page.locator('.account-login input[placeholder="请输入验证码"]');
+    if (await codeInput.isVisible().catch(() => false)) {
+      await codeInput.fill(code);
+    } else {
+      await page.evaluate((c) => {
+        const input = document.querySelector<HTMLInputElement>(
+          '.account-login input[placeholder="请输入验证码"]'
+        );
+        if (!input) return;
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype, "value"
+        )?.set;
+        if (nativeSetter) nativeSetter.call(input, c);
+        else input.value = c;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }, code);
+      console.log("[scraper] 已通过 JS 注入验证码");
+    }
 
     console.log("[scraper] 点击登录...");
     await page.locator(".account-login .el-button--primary").last().click();
