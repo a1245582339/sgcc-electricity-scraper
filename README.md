@@ -240,6 +240,22 @@ wrangler secret put API_TOKEN
 
 这里 `API_TOKEN` 是变量名（固定的，不要改），你粘贴的随机字符串是它的值。这个值就是后面配置 SmsForwarder Header 和 GitHub Secrets 中 `SMS_RELAY_TOKEN` 用的同一个东西。
 
+**2.8**（可选）配置 GitHub Actions 触发功能。如果你想通过 Worker 的 `POST /trigger` 接口远程触发抓取，需要额外设置两个 secret：
+
+```bash
+# GitHub Personal Access Token（需要 repo 或 actions:write 权限）
+# 生成地址：https://github.com/settings/tokens → Fine-grained tokens → Generate new token
+# 权限：选择你的仓库，勾选 Actions: Read and write
+wrangler secret put GITHUB_TOKEN
+# 粘贴你的 GitHub token
+
+# 仓库名，格式为 "用户名/仓库名"
+wrangler secret put GITHUB_REPO
+# 输入如：a1245582339/sgcc-electricity-scraper
+```
+
+不配置这两个的话，其他所有功能正常使用，只是 `POST /trigger` 接口会返回 500。
+
 ### 步骤 3：SmsForwarder 发送通道配置（方案 B）
 
 - URL：`https://sms-relay.<你的子域名>.workers.dev/sms`
@@ -267,31 +283,40 @@ wrangler secret put API_TOKEN
 
 ### 读取数据
 
-数据存在 Cloudflare KV 里，通过 Worker 的 `GET /data` 公开接口读取（无需鉴权）：
+数据存在 Cloudflare KV 里，通过 Worker 的 `GET /data` 接口读取（需要鉴权）：
 
 ```bash
-curl https://sms-relay.<你的子域名>.workers.dev/data
+curl -H "Authorization: Bearer <你的API_TOKEN>" \
+  https://sms-relay.<你的子域名>.workers.dev/data
 ```
 
-返回格式与方案 A 的 `GET /api/data` 完全相同。如果你有其他服务（如 magic-mirror 的 Go server）需要消费电费数据，把 `ELECTRICITY_API_URL` 指向这个 Worker URL 即可。
+返回格式与方案 A 的 `GET /api/data` 完全相同。如果你有其他服务（如 magic-mirror 的 Go server）需要消费电费数据，把 `ELECTRICITY_API_URL` 指向 Worker URL，`ELECTRICITY_API_TOKEN` 填同一个 API_TOKEN 即可。
 
 ---
 
 ## API 文档
 
-所有 `/api/*` 路由支持 Bearer Token 鉴权。设置了 `API_TOKEN` 环境变量后，请求需携带：
+所有接口均需 Bearer Token 鉴权（除特别说明外）：
 
 ```
-Authorization: Bearer your-secret-token
+Authorization: Bearer <API_TOKEN>
 ```
 
-### `GET /api/data`
+以下示例中 `$URL` 和 `$TOKEN` 请替换为实际值：
+- 方案 A：`URL=http://localhost:9559`，`TOKEN` 为 `.env` 中的 `API_TOKEN`
+- 方案 B：`URL=https://sms-relay.xxx.workers.dev`，`TOKEN` 为 Worker 的 `API_TOKEN`
 
-查询已抓取的用电数据。记录按日期降序排列。
+---
 
-**响应** `200 OK`
+### `GET /api/data` — 查询电费数据
 
-```jsonc
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$URL/api/data"
+```
+
+**响应** `200`
+
+```json
 {
   "records": [
     {
@@ -317,23 +342,32 @@ Authorization: Bearer your-secret-token
 | `records[].valleyUsage` | `string` | 谷时段用电量（kWh） |
 | `updatedAt` | `string` | 最后一次成功抓取时间 |
 
-### `POST /api/trigger`
+---
 
-手动触发一次抓取（异步执行，立即返回）。
+### `POST /api/trigger` — 手动触发抓取
+
+方案 A 触发本地 Playwright 抓取，方案 B 触发 GitHub Actions workflow（需配置步骤 2.8）。
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" "$URL/api/trigger"
+```
 
 | 状态码 | 响应体 | 说明 |
 |--------|--------|------|
-| `200` | `{"message": "抓取任务已触发"}` | 任务已开始 |
-| `409` | `{"error": "抓取任务正在运行中"}` | 同一时间只能运行一个抓取任务 |
+| `200` | `{"message": "抓取任务已触发"}` | 任务已触发 |
+| `409` | `{"error": "抓取任务正在运行中"}` | 同时只能跑一个（仅方案 A） |
 
-### `POST /api/webhook/sms`
+---
 
-接收 SmsForwarder 推送的短信（方案 A 直接调用此接口；方案 B 通过 CF Worker 中转）。
+### `POST /api/webhook/sms` — 接收短信（仅方案 A）
 
-**请求体**
+SmsForwarder 直接调用此接口推送验证码短信。
 
-```json
-{"text": "【国家电网】验证码654321，您正在登录..."}
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "【国家电网】验证码654321，您正在登录..."}' \
+  "$URL/api/webhook/sms"
 ```
 
 | 状态码 | 响应体 | 说明 |
@@ -341,13 +375,75 @@ Authorization: Bearer your-secret-token
 | `200` | `{"message": "验证码已接收"}` | 成功提取验证码 |
 | `400` | `{"message": "未找到6位验证码"}` | 未匹配到 6 位数字 |
 
-### `GET /health`
+---
 
-健康检查（无需鉴权）。
+### `POST /sms` — 接收短信（仅方案 B Worker）
 
-```json
-{"status": "ok", "running": false}
+SmsForwarder 推送短信到 Worker，验证码存入 KV 供 scraper 轮询。
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "【国家电网】验证码654321，您正在登录..."}' \
+  "$URL/sms"
 ```
+
+| 状态码 | 响应体 |
+|--------|--------|
+| `200` | `{"ok": true}` |
+| `400` | `{"error": "未找到6位验证码"}` |
+
+---
+
+### `GET /code` — 轮询验证码（仅方案 B Worker）
+
+scraper 在 GitHub Actions 中轮询此接口获取验证码，取到后自动删除。
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$URL/code"
+```
+
+| 响应体 | 说明 |
+|--------|------|
+| `{"code": "654321"}` | 有验证码，返回并删除 |
+| `{"code": null}` | 暂无验证码 |
+
+---
+
+### `DELETE /code` — 清除残留验证码（仅方案 B Worker）
+
+scraper 在请求新验证码前调用，防止用到旧的。
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN" "$URL/code"
+```
+
+**响应** `200`：`{"ok": true}`
+
+---
+
+### `PUT /data` — 存储电费数据（仅方案 B Worker）
+
+scraper 抓取完成后调用，将数据存入 Cloudflare KV。
+
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"records": [...], "updatedAt": "2025-03-14T00:05:12.000Z"}' \
+  "$URL/data"
+```
+
+**响应** `200`：`{"ok": true}`
+
+---
+
+### `GET /health` — 健康检查（仅方案 A，无需鉴权）
+
+```bash
+curl "$URL/health"
+```
+
+**响应** `200`：`{"status": "ok", "running": false}`
 
 ## 数据存储
 

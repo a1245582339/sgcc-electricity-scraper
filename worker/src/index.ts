@@ -1,6 +1,12 @@
 interface Env {
-  SMS_KV: KVNamespace;
+  SMS_KV: {
+    get(key: string): Promise<string | null>;
+    put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+    delete(key: string): Promise<void>;
+  };
   API_TOKEN: string;
+  GITHUB_TOKEN: string;
+  GITHUB_REPO: string;
 }
 
 const CODE_REGEX = /(?<!\d)(\d{6})(?!\d)/;
@@ -36,29 +42,23 @@ export default {
 
     const url = new URL(request.url);
 
-    // GET /data 或 /api/data — 公开接口，读取电费数据
-    if (request.method === 'GET' && (url.pathname === '/data' || url.pathname === '/api/data')) {
-      const data = await env.SMS_KV.get('electricity_data');
-      if (!data) return json({ records: [], updatedAt: '' });
-      return new Response(data, {
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        },
-      });
-    }
-
-    // 以下接口需要鉴权
     if (!checkAuth(request, env)) {
       return json({ error: 'Unauthorized' }, 401);
     }
 
+    // GET /data 或 /api/data — 读取电费数据
+    if (request.method === 'GET' && (url.pathname === '/data' || url.pathname === '/api/data')) {
+      const data = await env.SMS_KV.get('electricity_data');
+      if (!data) return json({ records: [], updatedAt: '' });
+      return json(JSON.parse(data));
+    }
+
     // POST /sms — SmsForwarder 推送短信
     if (request.method === 'POST' && url.pathname === '/sms') {
-      const body = await request.json<{ text?: string }>();
-      const match = body.text?.match(CODE_REGEX);
+      const body = (await request.json()) as { text?: string };
+      const match = (body.text ?? '').match(CODE_REGEX);
       if (!match) return json({ error: '未找到6位验证码' }, 400);
-      await env.SMS_KV.put('latest_code', match[1], { expirationTtl: CODE_TTL });
+      await env.SMS_KV.put('latest_code', match[1]!, { expirationTtl: CODE_TTL });
       return json({ ok: true });
     }
 
@@ -81,6 +81,28 @@ export default {
       const body = await request.text();
       await env.SMS_KV.put('electricity_data', body);
       return json({ ok: true });
+    }
+
+    // POST /trigger 或 /api/trigger — 触发 GitHub Actions 抓取
+    if (request.method === 'POST' && (url.pathname === '/trigger' || url.pathname === '/api/trigger')) {
+      if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) {
+        return json({ error: 'GITHUB_TOKEN 或 GITHUB_REPO 未配置' }, 500);
+      }
+      const ghRes = await fetch(
+        `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/scrape.yml/dispatches`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+            Accept: 'application/vnd.github+json',
+            'User-Agent': 'sms-relay-worker',
+          },
+          body: JSON.stringify({ ref: 'main' }),
+        },
+      );
+      if (ghRes.status === 204) return json({ message: '抓取任务已触发' });
+      const errText = await ghRes.text();
+      return json({ error: `GitHub API 返回 ${ghRes.status}`, detail: errText }, ghRes.status);
     }
 
     return json({ error: 'Not Found' }, 404);
