@@ -167,32 +167,79 @@ docker run -d \
 
 ### 步骤 2：部署 Cloudflare Worker
 
-Worker 代码在 `worker/` 目录，用于中转短信验证码。
+Worker 代码在 `worker/` 目录，用于中转短信验证码。需要一个 [Cloudflare 账号](https://dash.cloudflare.com/sign-up)（免费）。
+
+**2.1** 克隆仓库并进入 worker 目录：
 
 ```bash
-# 在本地 clone 你 fork 的仓库
 git clone https://github.com/<你的用户名>/sgcc-electricity-scraper.git
 cd sgcc-electricity-scraper/worker
-
-# 安装 wrangler CLI（如果没有）
-npm install -g wrangler
-
-# 登录 Cloudflare
-wrangler login
-
-# 创建 KV namespace
-wrangler kv namespace create SMS_KV
-# 命令会输出 id，把它填到 wrangler.toml 的 id 字段
-
-# 部署 Worker
-wrangler deploy
-
-# 设置 API Token（用于鉴权，自己生成一个随机字符串）
-wrangler secret put API_TOKEN
-# 输入你的 token，回车确认
 ```
 
-部署完成后你会得到一个 Worker URL，形如：`https://sms-relay.<你的子域名>.workers.dev`
+**2.2** 安装 [wrangler](https://developers.cloudflare.com/workers/wrangler/)（Cloudflare 的命令行工具）：
+
+```bash
+npm install -g wrangler
+```
+
+**2.3** 登录你的 Cloudflare 账号（会自动打开浏览器，点击授权即可）：
+
+```bash
+wrangler login
+```
+
+**2.4** 创建 KV 存储空间（用于临时保存验证码）：
+
+```bash
+wrangler kv namespace create SMS_KV
+```
+
+运行后终端会输出类似这样的信息：
+
+```
+🌀 Creating namespace with title "sms-relay-SMS_KV"
+✨ Success!
+Add the following to your configuration file:
+{ binding = "SMS_KV", id = "a1b2c3d4e5f67890abcdef1234567890" }
+```
+
+**2.5** 复制配置模板并填入你的 KV id：
+
+```bash
+cp wrangler.toml.example wrangler.toml
+```
+
+打开刚生成的 `wrangler.toml`，取消 KV 配置的注释并把上一步得到的 `id` 填进去：
+
+```toml
+[[kv_namespaces]]
+binding = "SMS_KV"
+id = "a1b2c3d4e5f67890abcdef1234567890"
+```
+
+> `wrangler.toml` 已在 `.gitignore` 中，不会被提交到仓库，你的 KV id 不会泄露。
+
+**2.6** 部署 Worker 到 Cloudflare：
+
+```bash
+wrangler deploy
+```
+
+部署成功后终端会输出你的 Worker URL，形如：
+
+```
+https://sms-relay.<你的子域名>.workers.dev
+```
+
+**记下这个 URL**，后续配置 SmsForwarder 和 GitHub Secrets 都要用到。
+
+**2.7** 设置鉴权密钥（防止别人调用你的 Worker）：
+
+```bash
+wrangler secret put API_TOKEN
+```
+
+终端会提示 `Enter a secret value:`，输入一个你自己生成的随机字符串（比如用 `openssl rand -hex 16` 生成），回车确认。**记下这个 Token**，后续配置也要用。
 
 ### 步骤 3：SmsForwarder 发送通道配置（方案 B）
 
