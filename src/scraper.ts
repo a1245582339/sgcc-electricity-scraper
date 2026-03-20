@@ -1,5 +1,5 @@
 import { chromium, type Browser, type Page } from "playwright";
-import { waitForCode } from "./sms.ts";
+import { waitForCode, clearPendingCode } from "./sms.ts";
 import { saveRecords, type ElectricityRecord } from "./storage.ts";
 
 const LOGIN_URL =
@@ -94,6 +94,7 @@ export async function runScraper(): Promise<ElectricityRecord[]> {
     await page.waitForTimeout(500);
 
     console.log("[scraper] 点击获取验证码...");
+    await clearPendingCode();
     await page.locator("a.yanzheng").click({ force: true });
 
     console.log("[scraper] 等待短信验证码...");

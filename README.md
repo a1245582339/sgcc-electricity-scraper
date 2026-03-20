@@ -22,11 +22,10 @@
        │                    │                              │
        │         ┌──────────▼──────────┐                   │
        │         │  SmsForwarder (手机) │                   │
-       │         │  监听到短信，转发到    │                   │
-       │         │  本服务的 webhook     │                  │
+       │         │  监听到短信，转发     │                    │
        │         └──────────┬──────────┘                   │
        │                    │                              │
-       │  ⑥ POST /api/webhook/sms {"text":"验证码123456"}  │
+       │  ⑥ 验证码送达（webhook 或 CF Worker 中转）          │
        │◄───────────────────┘                              │
        │                                                   │
        │  ⑦ 提取6位验证码，传递给浏览器                        │
@@ -43,45 +42,75 @@
   ⑮ 通过 GET /api/data 对外提供                             │
 ```
 
-**关键设计**：登录 95598 需要短信验证码，本服务通过内置的 webhook 端点接收验证码，配合手机上的 [SmsForwarder](https://github.com/pppscn/SmsForwarder) 实现全自动闭环——手机收到验证码短信后自动转发给本服务，服务再将验证码填入浏览器完成登录。
+**关键设计**：登录 95598 需要短信验证码，本服务通过 [SmsForwarder](https://github.com/pppscn/SmsForwarder) 配合手机实现全自动闭环——手机收到验证码短信后自动转发，服务再将验证码填入浏览器完成登录。
+
+---
 
 ## 前置条件
 
-- [Bun](https://bun.sh) >= 1.0
+无论选择哪种部署方案，都需要：
+
 - 国家电网 95598 账号（已绑定手机号）
 - Android 手机安装 [SmsForwarder](https://github.com/pppscn/SmsForwarder)，用于自动转发验证码短信
 
-## 快速开始
+### 配置 SmsForwarder
+
+在手机上安装 [SmsForwarder](https://github.com/pppscn/SmsForwarder) 后，添加一条转发规则：
+
+1. **转发规则** — 新建规则：
+   - 匹配字段：短信内容
+   - 匹配模式：包含
+   - 匹配值：`95598` 或 `国家电网`
+   - 发送通道：选择下面创建的 Webhook 通道
+
+2. **发送通道** — 新建 Webhook 通道（两种方案的配置不同，见下文）：
+   - 请求方式：`POST`
+   - Content-Type：`application/json`
+   - 请求模板：`{"text": "[msg]"}`
+   - URL 和 Header：**根据你选择的部署方案填写**（见各方案说明）
+
+---
+
+## 两种部署方案
+
+| | 方案 A：本地部署 | 方案 B：GitHub Actions + Cloudflare |
+|---|---|---|
+| **运行环境** | 你自己的服务器/NAS（7×24 运行） | GitHub Actions（定时触发，用完即走） |
+| **短信验证码** | SmsForwarder → 直接 POST 到服务 webhook | SmsForwarder → Cloudflare Worker 中转 → scraper 轮询 |
+| **数据存储** | 本地 JSON 文件，通过 API 对外提供 | 抓取后 PUT 推送到你的目标服务器 |
+| **适合场景** | 有 24 小时运行的机器 | 没有常开服务器，或只想白嫖 |
+| **费用** | 自付服务器电费 | 全免费（GitHub Actions 2000 分钟/月 + CF Worker 免费额度） |
+
+---
+
+## 方案 A：本地部署
+
+### 额外前置条件
+
+- [Bun](https://bun.sh) >= 1.0
+
+### 快速开始
 
 ```bash
-# 克隆项目
-# TODO: 替换为你的 GitHub 仓库地址
 git clone https://github.com/a1245582339/sgcc-electricity-scraper.git
 cd sgcc-electricity-scraper
 
-# 安装依赖
 bun install
-
-# 安装 Chromium 浏览器（Playwright 需要）
 bunx playwright install chromium
 
-# 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入你的手机号
+# 编辑 .env，填入 PHONE_NUMBER 和 API_TOKEN
 
-# 启动服务
 bun run start
 ```
 
-启动后访问 http://localhost:9559/health 确认服务正常运行。
+启动后访问 http://localhost:9559/health 确认服务正常。
 
-## Docker 部署
+### Docker 部署
 
 ```bash
-# 构建镜像
 docker build -t sgcc-electricity-scraper .
 
-# 运行容器
 docker run -d \
   --name sgcc-electricity \
   --restart unless-stopped \
@@ -93,37 +122,127 @@ docker run -d \
   sgcc-electricity-scraper
 ```
 
-## 环境变量
+### SmsForwarder 发送通道配置（方案 A）
+
+- URL：`http://<服务地址>:9559/api/webhook/sms`
+- Header（如设了 API_TOKEN）：`Authorization: Bearer your-secret-token`
+
+### 环境变量（方案 A）
 
 | 变量 | 必填 | 默认值 | 说明 |
 |------|:----:|--------|------|
 | `PHONE_NUMBER` | **是** | - | 国网 95598 绑定的手机号 |
-| `API_TOKEN` | 否 | 空（不鉴权） | API 访问令牌 |
+| `API_TOKEN` | 否 | 空 | API 访问令牌，未设置则不鉴权 |
 | `PORT` | 否 | `9559` | HTTP 服务端口 |
-| `CRON_SCHEDULE` | 否 | 空（不启用） | 定时抓取的 cron 表达式，如 `0 8 * * *` 表示每天 8:00 |
-| `RUN_ON_START` | 否 | `false` | 设为 `true` 则服务启动时立即执行一次抓取 |
+| `CRON_SCHEDULE` | 否 | 空 | 定时抓取 cron 表达式，如 `0 8 * * *` |
+| `RUN_ON_START` | 否 | `false` | 启动时立即抓取一次 |
+
+---
+
+## 方案 B：GitHub Actions + Cloudflare Worker
+
+无需自己的服务器。通过 GitHub Actions 定时运行抓取，Cloudflare Worker 做短信验证码中转。
+
+### 架构
+
+```
+┌──────────────┐        ┌──────────────────┐        ┌─────────────────┐
+│ SmsForwarder │ POST   │ Cloudflare Worker │  GET   │ GitHub Actions  │
+│   (手机)     │──────→ │   SMS Relay       │ ←───── │ (定时 scraper)  │
+│              │ /sms   │   KV 存取验证码    │ /code  │                 │
+└──────────────┘        └──────────────────┘        └────────┬────────┘
+                                                             │
+                                                    抓取完成后 PUT
+                                                             │
+                                                    ┌────────▼────────┐
+                                                    │  你的目标服务器   │
+                                                    │ /api/electricity │
+                                                    └─────────────────┘
+```
+
+### 步骤 1：Fork 本仓库
+
+1. 点击本仓库右上角的 **Fork** 按钮，Fork 到你的 GitHub 账号下
+2. 后续所有操作都在**你 Fork 的仓库**中进行
+
+### 步骤 2：部署 Cloudflare Worker
+
+Worker 代码在 `worker/` 目录，用于中转短信验证码。
+
+```bash
+# 在本地 clone 你 fork 的仓库
+git clone https://github.com/<你的用户名>/sgcc-electricity-scraper.git
+cd sgcc-electricity-scraper/worker
+
+# 安装 wrangler CLI（如果没有）
+npm install -g wrangler
+
+# 登录 Cloudflare
+wrangler login
+
+# 创建 KV namespace
+wrangler kv namespace create SMS_KV
+# 命令会输出 id，把它填到 wrangler.toml 的 id 字段
+
+# 部署 Worker
+wrangler deploy
+
+# 设置 API Token（用于鉴权，自己生成一个随机字符串）
+wrangler secret put API_TOKEN
+# 输入你的 token，回车确认
+```
+
+部署完成后你会得到一个 Worker URL，形如：`https://sms-relay.<你的子域名>.workers.dev`
+
+### 步骤 3：SmsForwarder 发送通道配置（方案 B）
+
+- URL：`https://sms-relay.<你的子域名>.workers.dev/sms`
+- Header：`Authorization: Bearer <你在步骤2设置的 API_TOKEN>`
+
+### 步骤 4：配置 GitHub Actions Secrets
+
+在你 Fork 的仓库中，进入 **Settings → Secrets and variables → Actions**，添加以下 Secrets：
+
+| Secret 名称 | 说明 | 示例 |
+|-------------|------|------|
+| `PHONE_NUMBER` | 国网绑定的手机号 | `13800138000` |
+| `SMS_RELAY_URL` | Cloudflare Worker 的 URL | `https://sms-relay.xxx.workers.dev` |
+| `SMS_RELAY_TOKEN` | Worker 的 API Token（步骤 2 中设置的） | `your-random-token` |
+| `PUSH_URL` | 抓取数据推送的目标地址 | `http://your-server:3000/api/electricity/data` |
+| `PUSH_TOKEN` | 目标服务器的推送鉴权 Token | `your-push-token` |
+
+### 步骤 5：验证
+
+1. 在仓库的 **Actions** 页面，手动触发一次 `Electricity Scraper` workflow
+2. 查看 Actions 日志，确认抓取成功
+3. 检查你的目标服务器是否收到了推送数据
+
+配置完成后，GitHub Actions 会按 cron 定时运行（默认北京时间 0:00 和 6:00 各一次），可在 `.github/workflows/scrape.yml` 中修改。
+
+### 环境变量（方案 B 专用）
+
+这些变量在方案 B 中通过 GitHub Secrets 配置，在方案 A 中不需要：
+
+| 变量 | 说明 |
+|------|------|
+| `SMS_RELAY_URL` | Cloudflare Worker URL，设置后自动切换为 relay 轮询模式 |
+| `SMS_RELAY_TOKEN` | Worker 的鉴权 Token |
+| `PUSH_URL` | 抓取完成后推送数据的目标 URL |
+| `PUSH_TOKEN` | 推送鉴权 Token |
+
+---
 
 ## API 文档
 
-所有 `/api/*` 路由支持 Bearer Token 鉴权。设置了 `API_TOKEN` 环境变量后，请求时需在 Header 中携带：
+所有 `/api/*` 路由支持 Bearer Token 鉴权。设置了 `API_TOKEN` 环境变量后，请求需携带：
 
 ```
 Authorization: Bearer your-secret-token
 ```
 
-未设置 `API_TOKEN` 时所有接口无需鉴权。
-
----
-
 ### `GET /api/data`
 
 查询已抓取的用电数据。记录按日期降序排列。
-
-**请求示例**
-
-```bash
-curl -H "Authorization: Bearer your-secret-token" http://localhost:9559/api/data
-```
 
 **响应** `200 OK`
 
@@ -131,137 +250,75 @@ curl -H "Authorization: Bearer your-secret-token" http://localhost:9559/api/data
 {
   "records": [
     {
-      "date": "2025-03-13",       // 日期
-      "fetchedAt": "2025-03-14T00:05:12.000Z",  // 抓取时间
-      "balance": "128.56",        // 账户余额（元）
-      "usage": "12.34",           // 当日总用电量（kWh）
-      "peakUsage": "8.20",        // 峰时段用电量（kWh）
-      "valleyUsage": "4.14"       // 谷时段用电量（kWh）
-    },
-    {
-      "date": "2025-03-12",
+      "date": "2025-03-13",
       "fetchedAt": "2025-03-14T00:05:12.000Z",
       "balance": "128.56",
-      "usage": "10.87",
-      "peakUsage": "7.11",
-      "valleyUsage": "3.76"
+      "usage": "12.34",
+      "peakUsage": "8.20",
+      "valleyUsage": "4.14"
     }
-    // ... 更多记录
   ],
-  "updatedAt": "2025-03-14T00:05:12.000Z"  // 最后一次抓取时间
+  "updatedAt": "2025-03-14T00:05:12.000Z"
 }
 ```
 
-**字段说明**
-
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `records` | `ElectricityRecord[]` | 用电记录数组，按日期降序 |
-| `records[].date` | `string` | 用电日期，格式 `YYYY-MM-DD` |
-| `records[].fetchedAt` | `string` | 该记录的抓取时间（ISO 8601） |
-| `records[].balance` | `string` | 抓取时的账户余额，单位：元 |
-| `records[].usage` | `string` | 当日总用电量，单位：kWh |
-| `records[].peakUsage` | `string` | 峰时段用电量，单位：kWh（无数据时为空字符串） |
-| `records[].valleyUsage` | `string` | 谷时段用电量，单位：kWh（无数据时为空字符串） |
-| `updatedAt` | `string` | 最后一次成功抓取的时间（ISO 8601），未抓取过时为空字符串 |
-
----
+| `records[].date` | `string` | 用电日期 `YYYY-MM-DD` |
+| `records[].fetchedAt` | `string` | 抓取时间（ISO 8601） |
+| `records[].balance` | `string` | 账户余额（元） |
+| `records[].usage` | `string` | 当日总用电量（kWh） |
+| `records[].peakUsage` | `string` | 峰时段用电量（kWh） |
+| `records[].valleyUsage` | `string` | 谷时段用电量（kWh） |
+| `updatedAt` | `string` | 最后一次成功抓取时间 |
 
 ### `POST /api/trigger`
 
-手动触发一次数据抓取。抓取在后台异步执行，接口立即返回。
-
-**请求示例**
-
-```bash
-curl -X POST -H "Authorization: Bearer your-secret-token" http://localhost:9559/api/trigger
-```
-
-**响应**
+手动触发一次抓取（异步执行，立即返回）。
 
 | 状态码 | 响应体 | 说明 |
 |--------|--------|------|
 | `200` | `{"message": "抓取任务已触发"}` | 任务已开始 |
-| `409` | `{"error": "抓取任务正在运行中"}` | 上一次抓取尚未完成，同一时间只能运行一个抓取任务 |
-
----
+| `409` | `{"error": "抓取任务正在运行中"}` | 同一时间只能运行一个抓取任务 |
 
 ### `POST /api/webhook/sms`
 
-接收短信转发工具推送的短信内容，从中提取 6 位数字验证码。此接口供 [SmsForwarder](https://github.com/pppscn/SmsForwarder) 等工具调用。
+接收 SmsForwarder 推送的短信（方案 A 直接调用此接口；方案 B 通过 CF Worker 中转）。
 
-**请求体** `Content-Type: application/json`
+**请求体**
 
 ```json
-{
-  "text": "【国家电网】验证码654321，您正在登录国网App，5分钟内有效。"
-}
+{"text": "【国家电网】验证码654321，您正在登录..."}
 ```
-
-**响应**
 
 | 状态码 | 响应体 | 说明 |
 |--------|--------|------|
-| `200` | `{"message": "验证码已接收"}` | 成功提取并接收验证码 |
-| `400` | `{"message": "未找到6位验证码", "text": "..."}` | 短信内容中未匹配到 6 位数字 |
-| `400` | `{"error": "缺少 text 字段"}` | 请求体缺少 `text` 字段 |
-| `400` | `{"error": "请求体解析失败"}` | 请求体不是合法 JSON |
-
----
+| `200` | `{"message": "验证码已接收"}` | 成功提取验证码 |
+| `400` | `{"message": "未找到6位验证码"}` | 未匹配到 6 位数字 |
 
 ### `GET /health`
 
-健康检查端点（无需鉴权）。
-
-**响应** `200 OK`
+健康检查（无需鉴权）。
 
 ```json
-{
-  "status": "ok",
-  "running": false
-}
+{"status": "ok", "running": false}
 ```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `status` | `string` | 固定为 `"ok"` |
-| `running` | `boolean` | 是否有抓取任务正在执行 |
-
-## 配置 SmsForwarder
-
-在手机上安装 [SmsForwarder](https://github.com/pppscn/SmsForwarder) 后，添加一条转发规则：
-
-1. **发送通道** - 新建一个 Webhook 通道：
-   - URL：`http://<本服务的局域网地址>:9559/api/webhook/sms`
-   - 请求方式：`POST`
-   - Content-Type：`application/json`
-   - 请求模板：`{"text": "[msg]"}`
-
-2. **转发规则** - 新建一条规则：
-   - 匹配字段：短信内容
-   - 匹配模式：包含
-   - 匹配值：`95598` 或 `国家电网`
-   - 发送通道：选择上面创建的 Webhook 通道
-
-配置完成后，当手机收到 95598 的验证码短信时，SmsForwarder 会自动将短信内容 POST 到本服务，服务从中提取验证码完成登录。
 
 ## 数据存储
 
-数据以 JSON 文件存储在 `data/` 目录下：
-
 ```
 data/
-├── records.json      # 用电记录（按日期去重合并，新数据覆盖旧数据）
+├── records.json      # 用电记录（按日期去重合并）
 └── updated_at.txt    # 最后一次抓取时间
 ```
 
-Docker 部署时建议挂载 volume 持久化此目录：`-v sgcc-electricity-data:/app/data`
+Docker 部署时建议挂载 volume：`-v sgcc-electricity-data:/app/data`
 
 ## 注意事项
 
 - 95598 网站前端使用 Vue，页面渲染较慢，单次抓取耗时约 1~3 分钟
 - 同一时间只允许运行一个抓取任务，重复触发会返回 409
-- 验证码有效期约 5 分钟，SmsForwarder 转发需在 1 分钟内完成（超时会失败）
+- 验证码有效期约 5 分钟，SmsForwarder 需在时限内完成转发
 - 建议抓取频率不超过每天 1~2 次，避免触发风控
 
 ## 与 [sgcc_electricity_new](https://github.com/ARC-MX/sgcc_electricity_new) 的区别
@@ -281,6 +338,7 @@ Docker 部署时建议挂载 volume 持久化此目录：`-v sgcc-electricity-da
 | **HA 集成** | 解耦，不依赖 HomeAssistant | 深度绑定 HomeAssistant |
 | **镜像体积** | 较小，无神经网络模型 | ~300MB，包含 ONNX Runtime + YOLOv3 模型 |
 | **架构** | 模块化 HTTP 服务（server / scraper / sms / storage / cron） | 单体 Python 脚本 |
+| **部署方式** | 本地 Docker 或 GitHub Actions + Cloudflare（零服务器） | Docker（需自托管） |
 
 **简单来说：**
 

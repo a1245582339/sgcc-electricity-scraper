@@ -1,5 +1,5 @@
 import { runScraper, isRunning } from "./scraper.ts";
-import { receiveCode } from "./sms.ts";
+import { receiveCode, isRelayMode } from "./sms.ts";
 import { readRecords, readUpdatedAt } from "./storage.ts";
 
 const API_TOKEN = process.env.API_TOKEN || "";
