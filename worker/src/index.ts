@@ -97,7 +97,7 @@ export default {
             Accept: 'application/vnd.github+json',
             'User-Agent': 'sms-relay-worker',
           },
-          body: JSON.stringify({ ref: 'main' }),
+          body: JSON.stringify({ ref: 'master' }),
         },
       );
       if (ghRes.status === 204) return json({ message: '抓取任务已触发' });
