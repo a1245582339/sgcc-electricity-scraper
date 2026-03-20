@@ -11,7 +11,7 @@ async function main() {
   console.log(`[run-once] 抓取完成，${records.length} 条记录`);
 
   if (PUSH_URL) {
-    console.log(`[run-once] 推送数据到 ${PUSH_URL}...`);
+    console.log("[run-once] 推送数据到目标服务器...");
     const body = JSON.stringify({
       records: readRecords(),
       updatedAt: readUpdatedAt(),

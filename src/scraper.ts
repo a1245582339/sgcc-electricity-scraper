@@ -172,7 +172,7 @@ export async function runScraper(): Promise<ElectricityRecord[]> {
       if (balance) break;
       await page.waitForTimeout(1000);
     }
-    console.log(`[scraper] 账户余额: ${balance} 元`);
+    console.log("[scraper] 账户余额已获取");
 
     // === Step 3: Click sidebar "电量电费查询" ===
     console.log("[scraper] 点击侧边栏「电量电费查询」...");
