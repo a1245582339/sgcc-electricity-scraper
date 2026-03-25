@@ -521,6 +521,25 @@ Docker 部署时建议挂载 volume：`-v sgcc-electricity-data:/app/data`
 - 验证码有效期约 5 分钟，SmsForwarder 需在时限内完成转发
 - 建议抓取频率不超过每天 1~2 次，避免触发风控
 
+### 中国大陆网络无法访问 `workers.dev`
+
+Cloudflare 的默认域名 `*.workers.dev` 在中国大陆被墙（TCP 连接超时），这会导致：
+
+1. **方案 B 的下游消费方**（如你自己的访问服务）无法从 Worker 拉取电费数据
+2. **SmsForwarder** 如果在国内网络下运行，也无法将短信验证码转发到 Worker
+
+**解决办法：给 Worker 绑定自定义域名。** 自定义域名走 Cloudflare CDN，在国内通常可以正常访问。
+
+操作步骤：
+
+1. 在 Cloudflare Dashboard 中将你的域名添加为站点（如果是 dnshe.com 等免费二级域名服务，直接输入完整子域名如 `your-name.ccwu.cc` 作为站点）
+2. 按提示将域名的 NS 记录指向 Cloudflare 分配的 nameserver
+3. 站点激活后，进入 **Workers & Pages → 你的 Worker → Settings → Domains & Routes → Add Custom Domain**，输入你的域名
+4. 将所有涉及 `workers.dev` 的地方替换为自定义域名：
+   - **SmsForwarder 发送通道 URL**：`https://your-domain.example.com/sms`
+   - **消费方的 `ELECTRICITY_API_URL`**：`https://your-domain.example.com`
+   - **GitHub Actions Secrets** 中的 `SMS_RELAY_URL`：`https://your-domain.example.com`
+
 ## 与 [sgcc_electricity_new](https://github.com/ARC-MX/sgcc_electricity_new) 的区别
 
 本项目与 ARC-MX 的 sgcc_electricity_new 解决的是同一个问题——从国家电网获取用电数据，但在技术选型和设计理念上有较大差异：
