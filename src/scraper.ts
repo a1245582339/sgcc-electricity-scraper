@@ -85,12 +85,29 @@ async function setInputValue(
 }
 
 async function ensureAgreementChecked(page: Page) {
-  const unchecked = page.locator(".code_form .checked-box.un-checked");
-  if ((await unchecked.count()) > 0) {
-    await unchecked.first().click({ force: true });
-    await page.waitForTimeout(300);
-    return;
-  }
+  const alreadyChecked = await page.evaluate(() => {
+    const box = document.querySelector(".code_form .checked-box");
+    if (!box) return true;
+    return (
+      box.classList.contains("checked") ||
+      !box.classList.contains("un-checked")
+    );
+  });
+  if (alreadyChecked) return;
+
+  const clicked = await page.evaluate(() => {
+    const box = document.querySelector<HTMLElement>(
+      ".code_form .checked-box.un-checked, .code_form .checked-box",
+    );
+    if (!box) return false;
+    box.click();
+    box.dispatchEvent(new Event("click", { bubbles: true }));
+    box.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  });
+  if (!clicked) throw new Error("无法找到协议勾选框");
+
+  await page.waitForTimeout(300);
 
   const checked = await page.evaluate(() => {
     const box = document.querySelector(".code_form .checked-box");
@@ -100,10 +117,16 @@ async function ensureAgreementChecked(page: Page) {
       !box.classList.contains("un-checked")
     );
   });
-  if (!checked) {
-    await page.locator(".code_form .checked-box").first().click({ force: true });
-    await page.waitForTimeout(300);
-  }
+  if (checked) return;
+
+  // Vue 可能监听父级 label 点击
+  await page.evaluate(() => {
+    const label = document.querySelector(
+      ".code_form label, .code_form .agreement, .code_form .checked-box",
+    ) as HTMLElement | null;
+    label?.click();
+  });
+  await page.waitForTimeout(300);
 }
 
 async function readLoginFormState(page: Page) {
