@@ -84,6 +84,20 @@ async function setInputValue(
   console.log(`[scraper] 已通过 JS 注入${label}`);
 }
 
+async function setInputValueIfNeeded(
+  page: Page,
+  selector: string,
+  value: string,
+  label: string,
+) {
+  const current = await page
+    .locator(selector)
+    .inputValue()
+    .catch(() => "");
+  if (current === value) return;
+  await setInputValue(page, selector, value, label);
+}
+
 async function ensureAgreementChecked(page: Page) {
   const alreadyChecked = await page.evaluate(() => {
     const box = document.querySelector(".code_form .checked-box");
@@ -159,7 +173,7 @@ async function submitLogin(page: Page) {
     .waitForResponse(
       (resp) =>
         resp.request().method() === "POST" &&
-        /login|auth|verify|sms|code|member|user/i.test(resp.url()),
+        /login|auth|verify|sms|code|member|user|95598/i.test(resp.url()),
       { timeout: 20000 },
     )
     .catch(() => null);
@@ -171,23 +185,65 @@ async function submitLogin(page: Page) {
           ".account-login .el-button--primary",
         ),
       );
-      const btn = buttons.at(-1);
-      btn?.click();
+      buttons.at(-1)?.click();
     });
   });
 
   const response = await responsePromise;
   if (response) {
     const status = response.status();
-    console.log(`[scraper] 登录请求响应: ${status} ${response.url()}`);
+    const body = await response.text().catch(() => "");
+    console.log(
+      `[scraper] 登录请求响应: ${status} ${response.url()} ${body.slice(0, 300)}`,
+    );
     if (status >= 400) {
-      const body = await response.text().catch(() => "");
       throw new Error(`登录接口返回 ${status}: ${body.slice(0, 200)}`);
     }
+    try {
+      const json = JSON.parse(body) as Record<string, unknown>;
+      const bizCode = json.code ?? json.status;
+      const msg = String(json.message ?? json.msg ?? json.error ?? "");
+      if (
+        json.success === false ||
+        bizCode === 1 ||
+        bizCode === "1" ||
+        bizCode === false ||
+        /失败|错误|invalid|expired|过期/i.test(msg)
+      ) {
+        throw new Error(`登录接口业务失败: ${msg || body.slice(0, 200)}`);
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("登录接口")) throw e;
+    }
+  } else {
+    console.log("[scraper] 未捕获到登录 POST 响应，尝试 Enter 提交...");
+    await page
+      .locator('.account-login input[placeholder="请输入验证码"]')
+      .press("Enter")
+      .catch(() => {});
   }
 }
 
 async function detectLoginState(page: Page) {
+  const url = page.url();
+  if (/\/osgweb\/login(\?|$)/i.test(url)) {
+    const err = await page.evaluate(() => {
+      for (const sel of [
+        ".el-message",
+        ".el-message-box",
+        ".el-notification",
+        ".el-form-item__error",
+      ]) {
+        for (const msg of Array.from(document.querySelectorAll(sel))) {
+          const text = msg.textContent?.trim();
+          if (text) return `error:${text}`;
+        }
+      }
+      return "waiting";
+    });
+    return err;
+  }
+
   return page.evaluate(() => {
     const isVisible = (el: Element | null) => {
       if (!el) return false;
@@ -200,57 +256,26 @@ async function detectLoginState(page: Page) {
       );
     };
 
-    const usernameEls = Array.from(document.querySelectorAll(".username"));
-    for (const el of usernameEls) {
-      if (!isVisible(el)) continue;
-      const text = el.textContent?.trim() || "";
+    const userEl = document.querySelector(
+      ".username.userlatent",
+    ) as HTMLElement | null;
+    if (userEl && isVisible(userEl)) {
+      const text = userEl.textContent?.trim() || "";
       if (text && !/登录|请登录|注册/.test(text)) return "ok";
     }
 
-    const accountLogin = document.querySelector(".account-login");
     const phoneInput = document.querySelector<HTMLInputElement>(
       '.account-login input[placeholder="手机号码"]',
     );
-    if (accountLogin && !isVisible(accountLogin) && !phoneInput?.offsetParent) {
-      return "ok";
-    }
+    if (phoneInput && isVisible(phoneInput)) return "waiting";
 
-    const topLogin = Array.from(
-      document.querySelectorAll("#column_top span, #column_top a"),
-    ).some(
-      (el) =>
-        isVisible(el) &&
-        (el.textContent?.includes("登录") || el.textContent?.includes("请登录")),
-    );
-    const hasUserMenu = Array.from(
-      document.querySelectorAll("#column_top span, #column_top a"),
-    ).some(
-      (el) =>
-        isVisible(el) &&
-        (el.textContent?.includes("我的") || el.textContent?.includes("退出")),
-    );
-    if (!topLogin && hasUserMenu) return "ok";
-
-    for (const storage of [localStorage, sessionStorage]) {
-      for (let i = 0; i < storage.length; i++) {
-        const key = storage.key(i) || "";
-        if (/token|user(info)?|auth|session|login/i.test(key)) {
-          const val = storage.getItem(key);
-          if (val && val !== "null" && val !== "{}" && val !== "[]") {
-            return "ok";
-          }
-        }
-      }
-    }
-
-    const errorSelectors = [
+    for (const sel of [
       ".el-message",
       ".el-message-box",
       ".el-notification",
       ".el-form-item__error",
       ".el-message--error",
-    ];
-    for (const sel of errorSelectors) {
+    ]) {
       for (const msg of Array.from(document.querySelectorAll(sel))) {
         const text = msg.textContent?.trim();
         if (text) return `error:${text}`;
@@ -259,6 +284,24 @@ async function detectLoginState(page: Page) {
 
     return "waiting";
   });
+}
+
+async function clickMyProfile(page: Page) {
+  const myLink = page.locator("#column_top span").filter({ hasText: "我的" });
+  const clicked = await myLink
+    .first()
+    .click({ force: true, timeout: 15000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (!clicked) {
+    await page.evaluate(() => {
+      const el = Array.from(document.querySelectorAll("#column_top span")).find(
+        (s) => s.textContent?.includes("我的"),
+      ) as HTMLElement | undefined;
+      el?.click();
+    });
+  }
 }
 
 async function dumpLoginFailure(page: Page) {
@@ -337,16 +380,21 @@ export async function runScraper(): Promise<ElectricityRecord[]> {
     const code = await waitForCode();
     console.log("[scraper] 收到验证码，准备提交登录...");
 
-    // 等待验证码期间 Vue 可能重渲染，提交前重新确保表单可见并补全字段（不切换 tab，避免验证码失效）
+    // 等待验证码期间 Vue 可能重渲染；仅补全缺失字段，避免重复填写手机号导致验证码失效
     await showAccountLoginForm(page, false);
-    await setInputValue(
-      page,
-      '.account-login input[placeholder="手机号码"]',
-      phoneNumber,
-      "手机号",
-    );
-    await ensureAgreementChecked(page);
-    await setInputValue(
+    const beforeSubmit = await readLoginFormState(page);
+    if (!beforeSubmit.phone) {
+      await setInputValue(
+        page,
+        '.account-login input[placeholder="手机号码"]',
+        phoneNumber,
+        "手机号",
+      );
+    }
+    if (!beforeSubmit.agreementChecked) {
+      await ensureAgreementChecked(page);
+    }
+    await setInputValueIfNeeded(
       page,
       '.account-login input[placeholder="请输入验证码"]',
       code,
@@ -372,12 +420,20 @@ export async function runScraper(): Promise<ElectricityRecord[]> {
       const loginState = await detectLoginState(page);
 
       if (loginState === "ok") {
+        if (/\/osgweb\/login(\?|$)/i.test(page.url())) {
+          console.log("[scraper] 仍在登录页，继续等待...");
+          continue;
+        }
         console.log(`[scraper] 登录成功, URL: ${page.url()}`);
         break;
       }
       if (loginState.startsWith("error:")) {
         await dumpLoginFailure(page);
         throw new Error(`登录失败: ${loginState.slice(6)}`);
+      }
+      if (i >= 2 && /\/osgweb\/login(\?|$)/i.test(page.url())) {
+        await dumpLoginFailure(page);
+        throw new Error("登录后被重定向到登录页，验证码可能已失效或登录请求被拒绝");
       }
       if (i === MAX_LOGIN_WAIT - 1) {
         await dumpLoginFailure(page);
@@ -391,12 +447,15 @@ export async function runScraper(): Promise<ElectricityRecord[]> {
     await page.waitForTimeout(2000);
     console.log(`[scraper] 登录后页面稳定, URL: ${page.url()}`);
 
+    if (!page.url().includes("electricityCharge")) {
+      console.log("[scraper] 返回电费查询页...");
+      await page.goto(LOGIN_URL, { waitUntil: "networkidle", timeout: 90000 });
+      await waitForVueRender(page);
+    }
+
     // === Step 1: Click "我的" in top nav ===
     console.log("[scraper] 点击右上角「我的」...");
-    await page
-      .locator("#column_top span")
-      .filter({ hasText: "我的" })
-      .click({ timeout: 10000 });
+    await clickMyProfile(page);
 
     console.log("[scraper] 等待「我的」页面加载...");
     await page.locator("b.cff8").waitFor({ state: "visible", timeout: 30000 });
