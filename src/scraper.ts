@@ -35,6 +35,216 @@ async function waitForUrlChange(page: Page, fromUrl: string, timeout = 15000) {
   throw new Error(`页面未跳转，仍停留在 ${fromUrl}`);
 }
 
+async function showAccountLoginForm(page: Page, switchTab = true) {
+  await page.evaluate(() => {
+    document
+      .querySelectorAll<HTMLElement>(".switch, .account-login, .code_form")
+      .forEach((el) => {
+        el.style.setProperty("display", "block", "important");
+      });
+  });
+  if (switchTab) {
+    const codeLoginTab = page.locator("div.code_login");
+    if ((await codeLoginTab.count()) > 0) {
+      await codeLoginTab.click({ force: true });
+    }
+  }
+  await page.waitForTimeout(500);
+}
+
+async function setInputValue(
+  page: Page,
+  selector: string,
+  value: string,
+  label: string,
+) {
+  const input = page.locator(selector);
+  if (await input.isVisible().catch(() => false)) {
+    await input.fill(value);
+    return;
+  }
+
+  const filled = await page.evaluate(
+    ({ sel, val }) => {
+      const el = document.querySelector<HTMLInputElement>(sel);
+      if (!el) return false;
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      if (nativeSetter) nativeSetter.call(el, val);
+      else el.value = val;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    },
+    { sel: selector, val: value },
+  );
+  if (!filled) throw new Error(`无法找到${label}`);
+  console.log(`[scraper] 已通过 JS 注入${label}`);
+}
+
+async function ensureAgreementChecked(page: Page) {
+  const unchecked = page.locator(".code_form .checked-box.un-checked");
+  if ((await unchecked.count()) > 0) {
+    await unchecked.first().click({ force: true });
+    await page.waitForTimeout(300);
+    return;
+  }
+
+  const checked = await page.evaluate(() => {
+    const box = document.querySelector(".code_form .checked-box");
+    if (!box) return true;
+    return (
+      box.classList.contains("checked") ||
+      !box.classList.contains("un-checked")
+    );
+  });
+  if (!checked) {
+    await page.locator(".code_form .checked-box").first().click({ force: true });
+    await page.waitForTimeout(300);
+  }
+}
+
+async function readLoginFormState(page: Page) {
+  return page.evaluate(() => {
+    const phone = document.querySelector<HTMLInputElement>(
+      '.account-login input[placeholder="手机号码"]',
+    );
+    const code = document.querySelector<HTMLInputElement>(
+      '.account-login input[placeholder="请输入验证码"]',
+    );
+    const loginBtn = document.querySelector<HTMLButtonElement>(
+      ".account-login .el-button--primary",
+    );
+    const agreement = document.querySelector(".code_form .checked-box");
+    return {
+      phone: phone?.value || "",
+      code: code?.value || "",
+      loginDisabled: loginBtn?.disabled ?? true,
+      agreementChecked:
+        !agreement?.classList.contains("un-checked") ||
+        agreement?.classList.contains("checked") ||
+        false,
+    };
+  });
+}
+
+async function submitLogin(page: Page) {
+  const loginBtn = page.locator(".account-login .el-button--primary").last();
+  const responsePromise = page
+    .waitForResponse(
+      (resp) =>
+        resp.request().method() === "POST" &&
+        /login|auth|verify|sms|code|member|user/i.test(resp.url()),
+      { timeout: 20000 },
+    )
+    .catch(() => null);
+
+  await loginBtn.click({ force: true, timeout: 10000 }).catch(async () => {
+    await page.evaluate(() => {
+      const buttons = Array.from(
+        document.querySelectorAll<HTMLButtonElement>(
+          ".account-login .el-button--primary",
+        ),
+      );
+      const btn = buttons.at(-1);
+      btn?.click();
+    });
+  });
+
+  const response = await responsePromise;
+  if (response) {
+    const status = response.status();
+    console.log(`[scraper] 登录请求响应: ${status} ${response.url()}`);
+    if (status >= 400) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`登录接口返回 ${status}: ${body.slice(0, 200)}`);
+    }
+  }
+}
+
+async function detectLoginState(page: Page) {
+  return page.evaluate(() => {
+    const isVisible = (el: Element | null) => {
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.opacity !== "0" &&
+        (el as HTMLElement).offsetParent !== null
+      );
+    };
+
+    const usernameEls = Array.from(document.querySelectorAll(".username"));
+    for (const el of usernameEls) {
+      if (!isVisible(el)) continue;
+      const text = el.textContent?.trim() || "";
+      if (text && !/登录|请登录|注册/.test(text)) return "ok";
+    }
+
+    const accountLogin = document.querySelector(".account-login");
+    const phoneInput = document.querySelector<HTMLInputElement>(
+      '.account-login input[placeholder="手机号码"]',
+    );
+    if (accountLogin && !isVisible(accountLogin) && !phoneInput?.offsetParent) {
+      return "ok";
+    }
+
+    const topLogin = Array.from(
+      document.querySelectorAll("#column_top span, #column_top a"),
+    ).some(
+      (el) =>
+        isVisible(el) &&
+        (el.textContent?.includes("登录") || el.textContent?.includes("请登录")),
+    );
+    const hasUserMenu = Array.from(
+      document.querySelectorAll("#column_top span, #column_top a"),
+    ).some(
+      (el) =>
+        isVisible(el) &&
+        (el.textContent?.includes("我的") || el.textContent?.includes("退出")),
+    );
+    if (!topLogin && hasUserMenu) return "ok";
+
+    for (const storage of [localStorage, sessionStorage]) {
+      for (let i = 0; i < storage.length; i++) {
+        const key = storage.key(i) || "";
+        if (/token|user(info)?|auth|session|login/i.test(key)) {
+          const val = storage.getItem(key);
+          if (val && val !== "null" && val !== "{}" && val !== "[]") {
+            return "ok";
+          }
+        }
+      }
+    }
+
+    const errorSelectors = [
+      ".el-message",
+      ".el-message-box",
+      ".el-notification",
+      ".el-form-item__error",
+      ".el-message--error",
+    ];
+    for (const sel of errorSelectors) {
+      for (const msg of Array.from(document.querySelectorAll(sel))) {
+        const text = msg.textContent?.trim();
+        if (text) return `error:${text}`;
+      }
+    }
+
+    return "waiting";
+  });
+}
+
+async function dumpLoginFailure(page: Page) {
+  const formState = await readLoginFormState(page).catch(() => null);
+  const loginState = await detectLoginState(page).catch(() => "unknown");
+  console.log("[scraper] 登录失败诊断:", { formState, loginState, url: page.url() });
+  await page.screenshot({ path: "scrape-debug.png", fullPage: true }).catch(() => {});
+}
+
 export async function runScraper(): Promise<ElectricityRecord[]> {
   if (running) throw new Error("抓取任务正在运行中");
   running = true;
@@ -76,23 +286,8 @@ export async function runScraper(): Promise<ElectricityRecord[]> {
 
     for (let attempt = 1; attempt <= MAX_LOGIN_SWITCH_ATTEMPTS; attempt++) {
       console.log(`[scraper] 切换到账号登录 (尝试 ${attempt}/${MAX_LOGIN_SWITCH_ATTEMPTS})...`);
+      await showAccountLoginForm(page);
 
-      // Force-show the account login section via DOM
-      await page.evaluate(() => {
-        document.querySelectorAll<HTMLElement>(".switch, .account-login, .code_form").forEach(el => {
-          el.style.setProperty("display", "block", "important");
-        });
-      });
-      await page.waitForTimeout(500);
-
-      // Click the SMS code login tab
-      const codeLoginTab = page.locator("div.code_login");
-      if (await codeLoginTab.count() > 0) {
-        await codeLoginTab.click({ force: true });
-      }
-      await page.waitForTimeout(1000);
-
-      // Check if phone input is now visible
       if (await phoneInput.isVisible().catch(() => false)) break;
 
       if (attempt === MAX_LOGIN_SWITCH_ATTEMPTS) {
@@ -101,34 +296,15 @@ export async function runScraper(): Promise<ElectricityRecord[]> {
     }
 
     console.log("[scraper] 输入手机号...");
-    if (await phoneInput.isVisible().catch(() => false)) {
-      await phoneInput.fill(phoneNumber);
-    } else {
-      // Fallback: set value via JavaScript when element is in DOM but hidden by Vue
-      const filled = await page.evaluate((phone) => {
-        const input = document.querySelector<HTMLInputElement>(
-          '.account-login input[placeholder="手机号码"]'
-        );
-        if (!input) return false;
-        const nativeSetter = Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype, "value"
-        )?.set;
-        if (nativeSetter) nativeSetter.call(input, phone);
-        else input.value = phone;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-        return true;
-      }, phoneNumber);
-      if (!filled) throw new Error("无法找到手机号输入框");
-      console.log("[scraper] 已通过 JS 注入手机号");
-    }
+    await setInputValue(
+      page,
+      '.account-login input[placeholder="手机号码"]',
+      phoneNumber,
+      "手机号",
+    );
 
     console.log("[scraper] 勾选同意协议...");
-    const checkbox = page.locator(".code_form .checked-box.un-checked");
-    if (await checkbox.count() > 0) {
-      await checkbox.click({ force: true });
-      await page.waitForTimeout(500);
-    }
+    await ensureAgreementChecked(page);
 
     console.log("[scraper] 点击获取验证码...");
     await clearPendingCode();
@@ -136,64 +312,55 @@ export async function runScraper(): Promise<ElectricityRecord[]> {
 
     console.log("[scraper] 等待短信验证码...");
     const code = await waitForCode();
-    console.log("[scraper] 收到验证码，填入中...");
+    console.log("[scraper] 收到验证码，准备提交登录...");
 
-    const codeInput = page.locator('.account-login input[placeholder="请输入验证码"]');
-    if (await codeInput.isVisible().catch(() => false)) {
-      await codeInput.fill(code);
-    } else {
-      await page.evaluate((c) => {
-        const input = document.querySelector<HTMLInputElement>(
-          '.account-login input[placeholder="请输入验证码"]'
-        );
-        if (!input) return;
-        const nativeSetter = Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype, "value"
-        )?.set;
-        if (nativeSetter) nativeSetter.call(input, c);
-        else input.value = c;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      }, code);
-      console.log("[scraper] 已通过 JS 注入验证码");
+    // 等待验证码期间 Vue 可能重渲染，提交前重新确保表单可见并补全字段（不切换 tab，避免验证码失效）
+    await showAccountLoginForm(page, false);
+    await setInputValue(
+      page,
+      '.account-login input[placeholder="手机号码"]',
+      phoneNumber,
+      "手机号",
+    );
+    await ensureAgreementChecked(page);
+    await setInputValue(
+      page,
+      '.account-login input[placeholder="请输入验证码"]',
+      code,
+      "验证码",
+    );
+
+    const formState = await readLoginFormState(page);
+    console.log("[scraper] 提交前表单状态:", formState);
+    if (!formState.phone || !formState.code) {
+      throw new Error(
+        `登录表单不完整: phone=${formState.phone ? "已填" : "空"}, code=${formState.code ? "已填" : "空"}`,
+      );
     }
 
     console.log("[scraper] 点击登录...");
-    await page.locator(".account-login .el-button--primary").last().click();
+    await submitLogin(page);
 
     // Verify login success
     console.log("[scraper] 等待登录结果...");
-    for (let i = 0; i < 15; i++) {
+    const MAX_LOGIN_WAIT = 30;
+    for (let i = 0; i < MAX_LOGIN_WAIT; i++) {
       await page.waitForTimeout(2000);
-      const loginState = await page.evaluate(() => {
-        const userEl = document.querySelector(
-          ".username.userlatent"
-        ) as HTMLElement;
-        if (userEl) {
-          const style = window.getComputedStyle(userEl);
-          if (style.display !== "none") return "ok";
-        }
-        const msgs = document.querySelectorAll(
-          ".el-message, .el-message-box, .el-notification"
-        );
-        for (const msg of Array.from(msgs)) {
-          const text = msg.textContent?.trim();
-          if (text) return `error:${text}`;
-        }
-        return "waiting";
-      });
+      const loginState = await detectLoginState(page);
 
       if (loginState === "ok") {
         console.log(`[scraper] 登录成功, URL: ${page.url()}`);
         break;
       }
       if (loginState.startsWith("error:")) {
+        await dumpLoginFailure(page);
         throw new Error(`登录失败: ${loginState.slice(6)}`);
       }
-      if (i === 14) {
-        throw new Error("登录超时：30秒内未检测到登录成功状态");
+      if (i === MAX_LOGIN_WAIT - 1) {
+        await dumpLoginFailure(page);
+        throw new Error("登录超时：60秒内未检测到登录成功状态");
       }
-      console.log(`[scraper] 等待登录中... (${i + 1}/15)`);
+      console.log(`[scraper] 等待登录中... (${i + 1}/${MAX_LOGIN_WAIT})`);
     }
 
     // Wait for post-login redirects to fully settle before navigating

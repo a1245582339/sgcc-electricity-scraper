@@ -10,7 +10,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -30,3 +30,11 @@ jobs:
           SMS_RELAY_URL: ${{ secrets.SMS_RELAY_URL }}
           SMS_RELAY_TOKEN: ${{ secrets.SMS_RELAY_TOKEN }}
         run: bun run src/run-once.ts
+
+      - name: Upload debug screenshot on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrape-debug
+          path: scrape-debug.png
+          if-no-files-found: ignore
